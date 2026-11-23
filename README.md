@@ -56,17 +56,38 @@ The `marts` schema is designed around six recurring commercial questions:
 
 Needs **Python 3.10+** and **PostgreSQL 16+** (staging uses `pg_input_is_valid`).
 
-### Option 1: Docker Compose (fastest, macOS / Linux / Windows)
+### Option 1: Docker Compose (fastest)
+
+Docker Compose reads `.env` too, so create it first. If PostgreSQL is already installed locally and
+using port 5432, also set `PGPORT=5433` in `.env`: the container then listens on 5433 and the
+pipeline connects there.
+
+**macOS / Linux**
 
 ```bash
+cp .env.example .env                # set PGPASSWORD=postgres (matches docker-compose.yml)
 docker compose up -d --wait
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env                # set PGPASSWORD=postgres (matches docker-compose.yml)
 
 # Run setup, load the real 312-line fixture, transform, and inspect status
 make demo
 make test
+```
+
+**Windows (PowerShell)** (no `make`, so the demo steps are spelled out)
+
+```powershell
+Copy-Item .env.example .env         # set PGPASSWORD=postgres, and PGPORT=5433 if 5432 is taken
+docker compose up -d --wait
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python -m pipeline setup
+python -m pipeline load tests\fixtures\sample_orders.csv
+python -m pipeline transform
+python -m pipeline status
+python -m pytest -v
 ```
 
 ### Option 2: Existing local PostgreSQL 16
@@ -117,7 +138,7 @@ Load years oldest first so SCD Type 2 effective dates advance chronologically. `
 
 | Command | Does |
 | --- | --- |
-| `setup` | Create the database and every schema, table, function, and default rule (safe to re-run; preserves rule edits) |
+| `setup` | Create the database and every schema, table, function, and default rule (safe to re-run; preserves rule edits; upgrades marts built by older versions) |
 | `load FILE...` | Load CSV or zip files into `raw`; files already loaded (same SHA-256) are skipped |
 | `transform` | Stage and merge waiting batches, run batch + global checks, refresh marts |
 | `run [--dataset D] [--file F]` | Monthly update: download (or use a local file), load, transform, prune old raw copies |
@@ -220,7 +241,8 @@ Running `make demo` against the included 312-line real-data sample (`tests/fixtu
 ## Architecture & Scaling Trade-offs
 
 - **Why plain Python + SQL instead of Airflow/dbt?** For a single-source monthly batch pipeline into PostgreSQL, `psycopg` + numbered SQL files keeps deployment trivial (two pip packages, zero orchestration overhead) while preserving the same layered modeling, testing, and idempotency guarantees.
-- **Why `TRUNCATE` + `INSERT` for marts?** Defining mart tables with explicit primary keys in `sql/00_setup/07_marts.sql` and refreshing via `TRUNCATE` + `INSERT` inside a transaction keeps refresh logic simple without dropping dependent BI views or table permissions.
+- **Why `TRUNCATE` + `INSERT` for marts?** Defining mart tables with explicit primary keys in `sql/00_setup/07_marts.sql` and refreshing via `TRUNCATE` + `INSERT` inside a transaction keeps refresh logic simple without dropping dependent BI views or table permissions. Earlier versions rebuilt marts with `CREATE TABLE AS`; on such a database, `setup` swaps those unkeyed tables for keyed ones and refills them in the same transaction, so no data is reloaded.
+- **Why rule edits win over shipped defaults?** `setup` inserts default rules with `ON CONFLICT DO NOTHING`, so an analyst's edits survive re-runs. The flip side: a corrected default in a later release does not overwrite an existing row, and has to be applied with an `UPDATE`.
 - **Scaling to the full 35M-row history:** For multi-year production SLAs on tens of millions of rows, the next natural steps are range-partitioning `core.fact_sales` by `ordered_on` (year/month) and switching monthly marts + global checks to refresh only partitions touched by the incoming batch.
 
 ## Tests & CI
@@ -236,6 +258,7 @@ Unit tests require no database. Integration tests run against PostgreSQL 16 in a
 - SCD Type 2 versioning on mid-month store renames + retroactive fact key repointing
 - Automatic rollback on truncated downloads (>2% missing invoices) and reused invoice IDs
 - Preservation of custom rule edits on `setup` re-runs and preservation of BI views across `marts` rebuilds
+- Upgrade of unkeyed marts from older versions on `setup`, refilled to match the fact table
 
 ## Project Layout
 

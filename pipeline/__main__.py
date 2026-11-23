@@ -42,9 +42,40 @@ def cmd_setup(args) -> None:
             log.info("   created database %s", dbname)
     with db.connect() as conn:
         with conn.transaction():
+            legacy = drop_legacy_marts(conn)
             for path in db.sql_files("00_setup"):
                 db.run_sql_file(conn, path)
+            if legacy:
+                # Refill the replaced marts now, so nothing reads empty tables until the next run.
+                for path in db.sql_files("30_marts"):
+                    db.run_sql_file(conn, path)
+                log.info("   replaced %d unkeyed mart tables from an older version, and refilled them",
+                         len(legacy))
     log.info("   schemas ready in %s", dbname)
+
+
+# Mart tables defined in sql/00_setup/07_marts.sql. Versions before that file built them with
+# CREATE TABLE AS on every run, so a database set up by those versions has them without keys.
+MART_TABLES = ("monthly_kpis", "category_month", "price_tier_month", "product_line_month",
+               "size_store_type_month", "item_lifecycle", "store_year")
+
+
+def drop_legacy_marts(conn: psycopg.Connection) -> list[str]:
+    """Drop mart tables that have no primary key, so 07_marts.sql recreates them with one.
+    Plain DROP: a view on one of them stops setup with a clear error instead of vanishing."""
+    legacy = [row[0] for row in conn.execute(
+        """
+        SELECT c.relname FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'marts' AND c.relkind = 'r' AND c.relname = ANY(%s)
+          AND NOT EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid = c.oid AND k.contype = 'p')
+        ORDER BY c.relname
+        """,
+        (list(MART_TABLES),),
+    )]
+    for name in legacy:
+        conn.execute(sql.SQL("DROP TABLE marts.{}").format(sql.Identifier(name)))
+    return legacy
 
 
 def collect_files(paths: list[str]) -> list[Path]:
