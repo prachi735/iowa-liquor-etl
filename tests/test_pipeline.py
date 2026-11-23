@@ -191,6 +191,22 @@ def test_setup_preserves_custom_rule_edits(db):
         )
 
 
+def test_setup_upgrades_unkeyed_marts(db):
+    # Databases set up before 07_marts.sql have marts built by CREATE TABLE AS, without keys.
+    conn, main, _ = db
+    conn.execute("ALTER TABLE marts.monthly_kpis DROP CONSTRAINT monthly_kpis_pkey")
+    conn.execute("TRUNCATE marts.monthly_kpis")
+    assert main(["setup"]) == 0
+    assert scalar(
+        conn,
+        "SELECT count(*) FROM pg_constraint "
+        "WHERE conrelid = 'marts.monthly_kpis'::regclass AND contype = 'p'",
+    ) == 1
+    assert scalar(conn, "SELECT sum(dollars) FROM marts.monthly_kpis") == scalar(
+        conn, "SELECT sum(dollars) FROM core.fact_sales"
+    )
+
+
 def test_product_line_rule(db):
     conn, _, _ = db
     cases = {
